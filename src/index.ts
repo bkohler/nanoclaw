@@ -724,7 +724,7 @@ async function connectWhatsApp(): Promise<void> {
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('messages.upsert', ({ messages }) => {
+  sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message) continue;
       const rawJid = msg.key.remoteJid;
@@ -742,12 +742,42 @@ async function connectWhatsApp(): Promise<void> {
 
       // Only store full message content for registered groups
       if (registeredGroups[chatJid]) {
-        storeMessage(
-          msg,
-          chatJid,
-          msg.key.fromMe || false,
-          msg.pushName || undefined,
-        );
+        if (msg.message.audioMessage?.ptt) {
+          try {
+            const { transcribeAudioMessage } = await import('./transcription.js');
+            const transcript = await transcribeAudioMessage(msg, sock);
+            const content = transcript ? `[Voice: ${transcript}]` : undefined;
+            storeMessage(
+              msg,
+              chatJid,
+              msg.key.fromMe || false,
+              msg.pushName || undefined,
+              content,
+            );
+            if (transcript) {
+              logger.info(
+                { chatJid, length: transcript.length },
+                'Transcribed voice message',
+              );
+            }
+          } catch (err) {
+            logger.error({ err }, 'Voice transcription error');
+            storeMessage(
+              msg,
+              chatJid,
+              msg.key.fromMe || false,
+              msg.pushName || undefined,
+              '[Voice Message - transcription failed]',
+            );
+          }
+        } else {
+          storeMessage(
+            msg,
+            chatJid,
+            msg.key.fromMe || false,
+            msg.pushName || undefined,
+          );
+        }
       }
     }
   });
