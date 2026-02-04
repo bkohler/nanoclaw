@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in Apple Container and handles IPC
  */
-import { spawn } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -44,6 +44,8 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  provider?: 'claude' | 'openai';
+  openaiModel?: string;
 }
 
 export interface ContainerOutput {
@@ -134,7 +136,13 @@ function buildVolumeMounts(
   const envFile = path.join(projectRoot, '.env');
   if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+    const allowedVars = [
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_API_KEY',
+      'LLM_PROVIDER',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+    ];
     const filteredLines = envContent.split('\n').filter((line) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) return false;
@@ -187,6 +195,20 @@ function buildContainerArgs(mounts: VolumeMount[]): string[] {
   return args;
 }
 
+function detectContainerRuntime(): 'container' | 'docker' {
+  try {
+    execSync('which container', { stdio: 'pipe' });
+    return 'container';
+  } catch {
+    try {
+      execSync('docker info', { stdio: 'pipe' });
+      return 'docker';
+    } catch {
+      throw new Error('No container runtime available (need Apple Container or Docker)');
+    }
+  }
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -224,9 +246,10 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn('container', containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+  const runtime = detectContainerRuntime();
+  const container = spawn(runtime, containerArgs, {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 
     let stdout = '';
     let stderr = '';

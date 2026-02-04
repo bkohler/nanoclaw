@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { createIpcMcp } from './ipc-mcp.js';
+import { getOpenAiTools, runOpenAiTool } from './openai-tools.js';
 
 interface ContainerInput {
   prompt: string;
@@ -15,6 +16,8 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  provider?: 'claude' | 'openai';
+  openaiModel?: string;
 }
 
 interface ContainerOutput {
@@ -200,6 +203,152 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   return lines.join('\n');
 }
 
+function readFileIfExists(filePath: string): string | null {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function buildOpenAiInstructions(input: ContainerInput): string {
+  const globalPath = input.isMain
+    ? '/workspace/project/groups/global/CLAUDE.md'
+    : '/workspace/global/CLAUDE.md';
+  const groupPath = '/workspace/group/CLAUDE.md';
+
+  const globalMemory = readFileIfExists(globalPath);
+  const groupMemory = readFileIfExists(groupPath);
+
+  const sections: string[] = [
+    'You are a helpful assistant for NanoClaw. Use tools when needed, and keep responses concise.',
+    'If asked to remember something, write it to the appropriate memory file using write_file.',
+    'Memory files: /workspace/group/CLAUDE.md (group). Global memory is /workspace/project/groups/global/CLAUDE.md for main, or /workspace/global/CLAUDE.md for non-main (read-only).',
+  ];
+
+  if (globalMemory) {
+    sections.push(`Global memory (read-only for non-main):\n${globalMemory}`);
+  }
+  if (groupMemory) {
+    sections.push(`Group memory:\n${groupMemory}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+function extractOpenAiOutputText(response: any): string | null {
+  if (response?.output_text && typeof response.output_text === 'string') {
+    return response.output_text;
+  }
+
+  if (!Array.isArray(response?.output)) return null;
+  const parts: string[] = [];
+  for (const item of response.output) {
+    if (item?.type === 'message' && Array.isArray(item.content)) {
+      for (const content of item.content) {
+        if (content?.type === 'output_text' && typeof content.text === 'string') {
+          parts.push(content.text);
+        }
+        if (content?.type === 'text' && typeof content.text === 'string') {
+          parts.push(content.text);
+        }
+      }
+    }
+  }
+  return parts.length ? parts.join('') : null;
+}
+
+async function openAiRequest(body: Record<string, unknown>): Promise<any> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is required when LLM_PROVIDER=openai');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI API error (${response.status}): ${errorText}`);
+  }
+
+  return response.json();
+}
+
+async function runOpenAiAgent(
+  input: ContainerInput,
+  prompt: string,
+): Promise<{ result: string | null; newSessionId?: string }> {
+  const model = input.openaiModel || process.env.OPENAI_MODEL;
+  if (!model) {
+    throw new Error('OPENAI_MODEL is required when LLM_PROVIDER=openai');
+  }
+
+  const tools = [{ type: 'web_search' }, ...getOpenAiTools()];
+  const instructions = buildOpenAiInstructions(input);
+
+  let response = await openAiRequest({
+    model,
+    input: prompt,
+    tools,
+    instructions,
+    previous_response_id: input.sessionId,
+  });
+
+  let guard = 0;
+  while (guard < 8) {
+    const toolCalls = Array.isArray(response?.output)
+      ? response.output.filter((item: any) => item?.type === 'function_call')
+      : [];
+
+    if (!toolCalls.length) break;
+
+    const toolOutputs = [];
+    for (const call of toolCalls) {
+      let args: Record<string, unknown> = {};
+      try {
+        args = call.arguments ? JSON.parse(call.arguments) : {};
+      } catch {
+        args = {};
+      }
+
+      const result = await runOpenAiTool(call.name, args, {
+        chatJid: input.chatJid,
+        groupFolder: input.groupFolder,
+        isMain: input.isMain,
+      });
+
+      toolOutputs.push({
+        type: 'function_call_output',
+        call_id: call.call_id,
+        output: result.output,
+      });
+    }
+
+    response = await openAiRequest({
+      model,
+      input: toolOutputs,
+      tools,
+      instructions,
+      previous_response_id: response.id,
+    });
+
+    guard += 1;
+  }
+
+  return {
+    result: extractOpenAiOutputText(response),
+    newSessionId: response?.id,
+  };
+}
+
 async function main(): Promise<void> {
   let input: ContainerInput;
 
@@ -232,37 +381,46 @@ async function main(): Promise<void> {
   }
 
   try {
-    log('Starting agent...');
+    const provider = input.provider || process.env.LLM_PROVIDER || 'claude';
 
-    for await (const message of query({
-      prompt,
-      options: {
-        cwd: '/workspace/group',
-        resume: input.sessionId,
-        allowedTools: [
-          'Bash',
-          'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'mcp__nanoclaw__*'
-        ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        mcpServers: {
-          nanoclaw: ipcMcp
-        },
-        hooks: {
-          PreCompact: [{ hooks: [createPreCompactHook()] }]
+    if (provider === 'openai') {
+      log('Starting OpenAI provider...');
+      const output = await runOpenAiAgent(input, prompt);
+      result = output.result;
+      newSessionId = output.newSessionId;
+    } else {
+      log('Starting Claude provider...');
+
+      for await (const message of query({
+        prompt,
+        options: {
+          cwd: '/workspace/group',
+          resume: input.sessionId,
+          allowedTools: [
+            'Bash',
+            'Read', 'Write', 'Edit', 'Glob', 'Grep',
+            'WebSearch', 'WebFetch',
+            'mcp__nanoclaw__*'
+          ],
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          settingSources: ['project'],
+          mcpServers: {
+            nanoclaw: ipcMcp
+          },
+          hooks: {
+            PreCompact: [{ hooks: [createPreCompactHook()] }]
+          }
         }
-      }
-    })) {
-      if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        log(`Session initialized: ${newSessionId}`);
-      }
+      })) {
+        if (message.type === 'system' && message.subtype === 'init') {
+          newSessionId = message.session_id;
+          log(`Session initialized: ${newSessionId}`);
+        }
 
-      if ('result' in message && message.result) {
-        result = message.result as string;
+        if ('result' in message && message.result) {
+          result = message.result as string;
+        }
       }
     }
 

@@ -22,6 +22,18 @@ claude
 
 Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
 
+### LLM Provider
+
+By default, NanoClaw uses Claude via the Claude Agent SDK. You can switch to OpenAI by setting:
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+```
+
+OpenAI mode supports WhatsApp I/O, scheduled tasks, file read/write/search tools, and web search, but does not include Claude Code's browser automation.
+
 ## Philosophy
 
 **Small enough to understand.** One process, a few source files. No microservices, no message queues, no abstraction layers. Have Claude Code walk you through it.

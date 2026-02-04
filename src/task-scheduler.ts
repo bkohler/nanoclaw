@@ -6,7 +6,9 @@ import pino from 'pino';
 import {
   DATA_DIR,
   GROUPS_DIR,
+  LLM_PROVIDER,
   MAIN_GROUP_FOLDER,
+  OPENAI_MODEL,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -98,6 +100,8 @@ async function runTask(
       chatJid: task.chat_jid,
       isMain,
       isScheduledTask: true,
+      provider: LLM_PROVIDER,
+      openaiModel: OPENAI_MODEL || undefined,
     });
 
     if (output.status === 'error') {

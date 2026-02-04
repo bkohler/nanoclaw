@@ -14,7 +14,9 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   IPC_POLL_INTERVAL,
+  LLM_PROVIDER,
   MAIN_GROUP_FOLDER,
+  OPENAI_MODEL,
   POLL_INTERVAL,
   STORE_DIR,
   TIMEZONE,
@@ -189,7 +191,12 @@ async function processMessage(msg: NewMessage): Promise<void> {
         .replace(/"/g, '&quot;');
     return `<message sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
   });
-  const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
+  const prompt =
+    `<messages>\n${lines.join('\n')}\n</messages>\n\n` +
+    `Instructions: You are the assistant responding in this chat. ` +
+    `Reply directly to the most recent user message. ` +
+    `Do not ask for permission to respond. ` +
+    `If there are multiple messages, respond to the latest and only mention earlier ones if necessary.`;
 
   if (!prompt) return;
 
@@ -248,6 +255,8 @@ async function runAgent(
       groupFolder: group.folder,
       chatJid,
       isMain,
+      provider: LLM_PROVIDER,
+      openaiModel: OPENAI_MODEL || undefined,
     });
 
     if (output.newSessionId) {
@@ -751,6 +760,40 @@ async function startMessageLoop(): Promise<void> {
 }
 
 function ensureContainerSystemRunning(): void {
+  try {
+    execSync('which container', { stdio: 'pipe' });
+  } catch {
+    try {
+      execSync('docker info', { stdio: 'pipe' });
+      logger.info('Docker detected and running. Using Docker as container runtime.');
+      return;
+    } catch (err) {
+      logger.error({ err }, 'No container runtime detected');
+      console.error(
+        '\n╔════════════════════════════════════════════════════════════════╗',
+      );
+      console.error(
+        '║  FATAL: No container runtime available                         ║',
+      );
+      console.error(
+        '║                                                                ║',
+      );
+      console.error(
+        '║  Install and start one of the following:                       ║',
+      );
+      console.error(
+        '║  - Apple Container: https://github.com/apple/container/releases║',
+      );
+      console.error(
+        '║  - Docker: https://www.docker.com/products/docker-desktop       ║',
+      );
+      console.error(
+        '╚════════════════════════════════════════════════════════════════╝\n',
+      );
+      throw new Error('No container runtime available');
+    }
+  }
+
   try {
     execSync('container system status', { stdio: 'pipe' });
     logger.debug('Apple Container system already running');
